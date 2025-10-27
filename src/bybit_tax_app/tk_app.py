@@ -589,7 +589,8 @@ class App(tk.Tk):
             messagebox.showerror("Plotting", f"matplotlib not available: {e}", parent=self)
             return
 
-        # Prepare single combined series: cumulative net (PnL - fees) over time for all selected rows
+        # Prepare single combined series: cumulative net over time for all selected rows
+        # Note: include spot fees, but exclude derivative fees from the plotted series
         combined_deltas: list[tuple[datetime, float]] = []
         for (year, cat) in keys:
             series_events = (events_map.get(year, {}) or {}).get(cat, [])
@@ -603,6 +604,9 @@ class App(tk.Tk):
                     if ts:
                         combined_deltas.append((ts, amt))
                 elif ev.get("type") == "fee":
+                    # Only include fees for spot; skip derivative fees for the graph
+                    if cat != "spot":
+                        continue
                     ts = ev.get("ts")
                     try:
                         amt = -abs(float(ev.get("fiat_fee", 0.0)))
@@ -741,7 +745,7 @@ class App(tk.Tk):
                     "","",
                     "",
                     f"{float(ev.get('fiat_fee', 0.0)):.10f}",
-                    "1",
+                    ("1" if cat == "spot" else "0"),
                 ])
 
         try:
@@ -1055,13 +1059,14 @@ class App(tk.Tk):
         btns = ttk.Frame(frame)
         btns.grid(row=row, column=0, columnspan=4, sticky="ew", padx=8, pady=(8, 4))
         ttk.Button(btns, text="Add Manual Buy", command=self._add_manual_buy).pack(side=tk.LEFT)
-        ttk.Button(btns, text="Refresh", command=self._refresh_manual_buys).pack(side=tk.LEFT, padx=(8, 0))
+        # Refresh should also refresh the accounts list similar to other tabs
+        ttk.Button(btns, text="Refresh", command=lambda: (self._refresh_manual_accounts(), self._refresh_manual_buys())).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(btns, text="Delete Selected", command=self._delete_selected_manual).pack(side=tk.LEFT, padx=(8, 0))
         row += 1
 
         # List of manual buys
         columns = ("exec_id", "timestamp", "base", "quote", "qty", "price", "fees")
-        self.manual_tree = ttk.Treeview(frame, columns=columns, show="headings", height=10)
+        self.manual_tree = ttk.Treeview(frame, columns=columns, show="headings", height=10, selectmode="extended")
         for col, text_, width, anchor in (
             ("exec_id", "Exec ID", 220, "w"),
             ("timestamp", "Timestamp", 160, "w"),
@@ -1189,18 +1194,31 @@ class App(tk.Tk):
         from .models import SpotExecution
         sel = self.manual_tree.selection()
         if not sel:
-            messagebox.showinfo("Manual Buys", "Please select a row to delete.", parent=self)
+            messagebox.showinfo("Manual Buys", "Please select one or more rows to delete.", parent=self)
             return
-        vals = self.manual_tree.item(sel[0], "values")
-        if not vals:
+        # Collect exec_ids from all selected rows
+        exec_ids: list[str] = []
+        for iid in sel:
+            vals = self.manual_tree.item(iid, "values")
+            if not vals:
+                continue
+            exec_id = vals[0]
+            if exec_id:
+                exec_ids.append(exec_id)
+        if not exec_ids:
             return
-        exec_id = vals[0]
-        if not messagebox.askyesno("Manual Buys", "Delete selected manual buy?", parent=self):
+        plural = "s" if len(exec_ids) > 1 else ""
+        if not messagebox.askyesno("Manual Buys", f"Delete {len(exec_ids)} manual buy{plural}?", parent=self):
             return
         try:
             with get_session() as session:
-                obj = session.get(SpotExecution, exec_id)
-                if obj is not None:
+                # Delete in bulk
+                rows = (
+                    session.query(SpotExecution)
+                    .filter(SpotExecution.exec_id.in_(exec_ids))
+                    .all()
+                )
+                for obj in rows:
                     session.delete(obj)
         except Exception as e:
             messagebox.showerror("Manual Buys", f"Failed to delete: {e}", parent=self)
