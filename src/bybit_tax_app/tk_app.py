@@ -541,12 +541,9 @@ class App(tk.Tk):
                 gains_taxable = float(row.get("taxable_gains", 0.0))
                 losses_taxable = float(row.get("taxable_losses", 0.0))
                 fees = float(row.get("fees", 0.0))
+                # Fees are already included in losses for both spot and derivatives
                 net = gains - losses
                 net_taxable = gains_taxable - losses_taxable
-                
-                if cat_key == "spot":
-                    net -= fees
-                    net_taxable -= fees
                     
                 self.tax_tree.insert("", tk.END, values=(year, ("Spot" if cat_key == "spot" else "Derivatives"), f"{fees:.2f}", f"{net:.2f}", f"{net_taxable:.2f}"))
         self.tax_progress.stop()
@@ -590,7 +587,7 @@ class App(tk.Tk):
             return
 
         # Prepare single combined series: cumulative net over time for all selected rows
-        # Note: include spot fees, but exclude derivative fees from the plotted series
+        # Note: fees are now included in PnL values for both spot and derivatives
         combined_deltas: list[tuple[datetime, float]] = []
         for (year, cat) in keys:
             series_events = (events_map.get(year, {}) or {}).get(cat, [])
@@ -603,17 +600,7 @@ class App(tk.Tk):
                         amt = 0.0
                     if ts:
                         combined_deltas.append((ts, amt))
-                elif ev.get("type") == "fee":
-                    # Only include fees for spot; skip derivative fees for the graph
-                    if cat != "spot":
-                        continue
-                    ts = ev.get("ts")
-                    try:
-                        amt = -abs(float(ev.get("fiat_fee", 0.0)))
-                    except Exception:
-                        amt = 0.0
-                    if ts:
-                        combined_deltas.append((ts, amt))
+                # Skip fee events for graph - they're already in PnL
         combined_deltas.sort(key=lambda x: x[0])
         x_vals: list[datetime] = []
         y_vals: list[float] = []
@@ -627,6 +614,38 @@ class App(tk.Tk):
             label = f"{y0} - {'Spot' if c0=='spot' else 'Derivatives'}"
         else:
             label = f"Combined ({len(keys)} selections)"
+
+        # Calculate per-selection and total summary statistics
+        # Note: For both spot and derivatives, fees are now included in the PnL values (losses)
+        per_selection_stats: list[tuple[int, str, float, float, float, float]] = []  # (year, cat, wins, losses, fees, net)
+        total_wins = 0.0
+        total_losses = 0.0
+        total_fees = 0.0
+        
+        for (year, cat) in keys:
+            wins = 0.0
+            losses = 0.0
+            fees = 0.0
+            series_events = (events_map.get(year, {}) or {}).get(cat, [])
+            for ev in series_events:
+                if ev.get("type") == "pnl":
+                    fiat_val = float(ev.get("fiat_value", 0.0))
+                    if fiat_val > 0:
+                        wins += fiat_val
+                    else:
+                        losses += abs(fiat_val)
+                elif ev.get("type") == "fee":
+                    fees += float(ev.get("fiat_fee", 0.0))
+            
+            # Fees are already included in PnL (losses) for both spot and derivatives
+            net = wins - losses
+            per_selection_stats.append((year, cat, wins, losses, fees, net))
+            total_wins += wins
+            total_losses += losses
+            total_fees += fees
+
+        # Calculate total net by summing individual nets (preserves spot/deriv fee logic)
+        total_net = sum(net for _, _, _, _, _, net in per_selection_stats)
 
         # Create window and plot
         win = tk.Toplevel(self)
@@ -642,6 +661,58 @@ class App(tk.Tk):
         canvas = FigureCanvasTkAgg(fig, master=win)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Details table
+        fiat_code = getattr(self, 'current_account_fiat', 'EUR')
+        details_frame = ttk.Frame(win)
+        details_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(8, 0))
+        
+        ttk.Label(details_frame, text="Details by Selection:", font=("Helvetica", 11, "bold")).pack(anchor="w", pady=(0, 4))
+        
+        # Create treeview for per-selection stats
+        columns = ("year", "category", "wins", "losses", "fees", "net")
+        details_tree = ttk.Treeview(details_frame, columns=columns, show="headings", height=min(len(per_selection_stats) + 1, 8))
+        
+        details_tree.heading("year", text="Year")
+        details_tree.heading("category", text="Category")
+        details_tree.heading("wins", text="Wins")
+        details_tree.heading("losses", text="Losses + Fees")
+        details_tree.heading("fees", text="Fees")
+        details_tree.heading("net", text="Net P/L")
+        
+        details_tree.column("year", width=60, anchor="center")
+        details_tree.column("category", width=100, anchor="center")
+        details_tree.column("wins", width=120, anchor="e")
+        details_tree.column("losses", width=120, anchor="e")
+        details_tree.column("fees", width=120, anchor="e")
+        details_tree.column("net", width=120, anchor="e")
+        
+        # Add per-selection rows
+        for year, cat, wins, losses, fees, net in per_selection_stats:
+            cat_label = "Spot" if cat == "spot" else "Derivatives"
+            details_tree.insert("", tk.END, values=(
+                year,
+                cat_label,
+                f"{wins:,.2f}",
+                f"{losses:,.2f}",
+                f"{fees:,.2f}",
+                f"{net:,.2f}"
+            ))
+        
+        # Add total row with separator styling
+        total_id = details_tree.insert("", tk.END, values=(
+            "",
+            "TOTAL",
+            f"{total_wins:,.2f}",
+            f"{total_losses:,.2f}",
+            f"{total_fees:,.2f}",
+            f"{total_net:,.2f}"
+        ), tags=("total",))
+        
+        # Style the total row
+        details_tree.tag_configure("total", font=("Helvetica", 10, "bold"))
+        
+        details_tree.pack(fill=tk.BOTH, expand=True)
 
         btns = ttk.Frame(win)
         btns.pack(fill=tk.X, padx=8, pady=6)
@@ -888,7 +959,7 @@ class App(tk.Tk):
                 return
             pools.setdefault(asset.upper(), []).append(Lot(qty, buy_price, category, ts))
 
-        def dispose(asset: str, quote: str, qty: float, sell_price: float, ts: datetime):
+        def dispose(asset: str, quote: str, qty: float, sell_price: float, ts: datetime, fee_in_quote: float = 0.0):
             # Consume from oldest lots across categories; attribute P/L by lot.category
             if qty <= 0:
                 return
@@ -905,7 +976,9 @@ class App(tk.Tk):
                 proceeds = sell_price * take
                 cost = lot.buy_price * take
                 quote_fiat_rate = fiat_rate_for(quote, ts)
-                fiat_pnl = (proceeds - cost) * quote_fiat_rate
+                # For spot: subtract fees from PnL (like derivatives)
+                fee_portion = (take / qty) * fee_in_quote if qty > 0 else 0.0
+                fiat_pnl = (proceeds - cost - fee_portion) * quote_fiat_rate
                 # not taxable if buy and sell longer than 1 year apart
                 taxable = (ts - lot.ts) < timedelta(days=365)
                 add_pl(lot.category, ts, fiat_pnl, taxable=taxable)
@@ -965,10 +1038,12 @@ class App(tk.Tk):
                 rate_quote_fiat = fiat_rate_for(quote, ts, r)
                 side = getattr(r.side, "name", str(r.side)).upper()
                 if side == "BUY":
-                    add_lot(base, qty, price, ts)
+                    # For buys, fees increase the cost basis
+                    effective_price = price + (fee_quote / qty if qty > 0 else 0.0)
+                    add_lot(base, qty, effective_price, ts)
                     add_fee("spot", ts, fee_quote * rate_quote_fiat)
                 else:  # SELL
-                    dispose(base, quote, qty, price, ts)
+                    dispose(base, quote, qty, price, ts, fee_in_quote=fee_quote)
                     add_fee("spot", ts, fee_quote * rate_quote_fiat)
             else:
                 r: DerivativeClosedPnl = row
