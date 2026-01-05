@@ -100,11 +100,12 @@ class App(tk.Tk):
         row += 1
 
         # Summary table
-        columns = ("year", "category", "fees", "net", "net_taxable")
+        columns = ("year", "category", "volume", "fees", "net", "net_taxable")
         self.tax_tree = ttk.Treeview(frame, columns=columns, show="headings", height=12, selectmode="extended")
         for col, w, anchor in (
             ("year", 80, "center"),
             ("category", 120, "center"),
+            ("volume", 140, "e"),
             ("fees", 120, "e"),
             ("net", 140, "e"),
             ("net_taxable", 140, "e"),
@@ -541,11 +542,12 @@ class App(tk.Tk):
                 gains_taxable = float(row.get("taxable_gains", 0.0))
                 losses_taxable = float(row.get("taxable_losses", 0.0))
                 fees = float(row.get("fees", 0.0))
+                volume = float(row.get("volume", 0.0))
                 # Fees are already included in losses for both spot and derivatives
                 net = gains - losses
                 net_taxable = gains_taxable - losses_taxable
                     
-                self.tax_tree.insert("", tk.END, values=(year, ("Spot" if cat_key == "spot" else "Derivatives"), f"{fees:.2f}", f"{net:.2f}", f"{net_taxable:.2f}"))
+                self.tax_tree.insert("", tk.END, values=(year, ("Spot" if cat_key == "spot" else "Derivatives"), f"{volume:.2f}", f"{fees:.2f}", f"{net:.2f}", f"{net_taxable:.2f}"))
         self.tax_progress.stop()
         self.tax_status_var.set("Completed")
         self._set_tax_controls_enabled(True)
@@ -915,6 +917,7 @@ class App(tk.Tk):
                 self.taxable_gains = 0.0
                 self.taxable_losses = 0.0
                 self.fees = 0.0
+                self.volume = 0.0
 
             def as_dict(self) -> dict:
                 return {
@@ -923,6 +926,7 @@ class App(tk.Tk):
                     "taxable_gains": self.taxable_gains,
                     "taxable_losses": self.taxable_losses,
                     "fees": self.fees,
+                    "volume": self.volume,
                 }
 
         # Yearly buckets per category
@@ -1036,6 +1040,10 @@ class App(tk.Tk):
                 price = float(r.price)
                 fee_quote = float(r.fees or 0.0)
                 rate_quote_fiat = fiat_rate_for(quote, ts, r)
+                # Track volume in fiat terms
+                y = ts.year
+                agg.setdefault(y, {}).setdefault("spot", CategorySummary())
+                agg[y]["spot"].volume += qty * price * rate_quote_fiat
                 side = getattr(r.side, "name", str(r.side)).upper()
                 if side == "BUY":
                     # For buys, fees increase the cost basis
@@ -1051,6 +1059,12 @@ class App(tk.Tk):
                 base, quote = parse_symbol(sym)
                 net_units = float(r.closed_pnl or 0.0)
                 rate_quote_fiat = fiat_rate_for(quote, ts)
+                # Track volume in fiat terms (using avg of entry/exit prices if available)
+                y = ts.year
+                agg.setdefault(y, {}).setdefault("deriv", CategorySummary())
+                deriv_qty = float(abs(getattr(r, 'qty', 0.0) or 0.0))
+                avg_price = (float(r.entry_price or 0.0) + float(r.exit_price or 0.0)) / 2 if r.entry_price and r.exit_price else float(r.exit_price or 0.0)
+                agg[y]["deriv"].volume += deriv_qty * avg_price * rate_quote_fiat
                 if (r.fees or 0.0) > 0:
                     add_fee("deriv", ts, float(r.fees) * rate_quote_fiat)
 
