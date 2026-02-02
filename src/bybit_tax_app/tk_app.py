@@ -81,7 +81,8 @@ class App(tk.Tk):
             from datetime import date
             today = date.today()
             start_of_year = today.replace(month=1, day=1)
-            self.tax_start_var.set(start_of_year.isoformat())
+            # self.tax_start_var.set(start_of_year.isoformat())
+            self.tax_start_var.set("2025-01-01")  # default to a far past date to capture all
             self.tax_end_var.set(today.isoformat())
         except Exception:
             pass
@@ -973,7 +974,7 @@ class App(tk.Tk):
             
             while remain > 1e-8:
                 if not lots:
-                    raise RuntimeError(f"Not enough {asset} to sell {qty} at {ts.isoformat()}")
+                    raise RuntimeError(f"Not enough {asset} ({sum(l.qty for l in lots)}) to sell {qty} at {ts.isoformat()}")
 
                 lot = lots[0]
                 take = min(lot.qty, remain)
@@ -1057,8 +1058,8 @@ class App(tk.Tk):
                 r: DerivativeClosedPnl = row
                 sym = (r.symbol or "").upper()
                 base, quote = parse_symbol(sym)
-                net_units = float(r.closed_pnl or 0.0)
                 rate_quote_fiat = fiat_rate_for(quote, ts)
+                net_units = float(r.closed_pnl or 0.0)
                 # Track volume in fiat terms (using avg of entry/exit prices if available)
                 y = ts.year
                 agg.setdefault(y, {}).setdefault("deriv", CategorySummary())
@@ -1071,7 +1072,7 @@ class App(tk.Tk):
                 if net_units > 0:
                     add_lot(quote, net_units, rate_quote_fiat, ts)
                 elif net_units < 0:
-                    dispose(quote, fiat, -net_units, rate_quote_fiat, ts)
+                    dispose(quote, fiat, -net_units * rate_quote_fiat, rate_quote_fiat, ts)
 
                 add_pl("deriv", ts, net_units * rate_quote_fiat)
                 # record derivative detailed event (entry timestamp not available in model; use close ts)
@@ -1577,6 +1578,7 @@ class App(tk.Tk):
             start_date = start_date.replace(day=1)
             self.end_date_var.set(today.isoformat())
             self.start_date_var.set(start_date.isoformat())
+            self.start_date_var.set("2025-01-01")  # default to a far past date to capture all
         except Exception:
             pass
 
